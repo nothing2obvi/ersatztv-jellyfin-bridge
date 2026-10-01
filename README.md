@@ -1,6 +1,6 @@
 # ersatztv-jellyfin-bridge
 
-## What this does and why
+## What This Does and Why
 
 Jellyfin mistakes ErsatzTV streams for having a 20 Mbps bitrate even when the
 actual bitrate is lower, including when the streams pass through Dispatcharr.
@@ -18,7 +18,7 @@ support or playback settings require it.
 
 But in my experience, with this, Jellyfin direct plays, so long as the streams are under the bitrate limits you set in Jellyfin.
 
-## important notes
+## Important Notes
 
 - Bitrates are sampled averages and cached for five minutes. First playback can
   take longer while the bridge measures the stream.
@@ -28,7 +28,7 @@ But in my experience, with this, Jellyfin direct plays, so long as the streams a
 - Run on a trusted LAN; the proxy has no authentication.
 - Keep your real URLs in `config.yml`, which is excluded from Git and the image.
 
-## how to use
+## How to Use
 
 Copy `config.example.yml` to `config.yml`. Set `m3u_url` to your upstream playlist
 and `public_url` to the bridge address reachable from Jellyfin, using port 8121.
@@ -38,7 +38,7 @@ Create `docker-compose.yml`:
 ```yaml
 services:
   ersatztv-jellyfin-bridge:
-    image: ghcr.io/nothing2obvi/ersatztv-jellyfin-bridge:v0.1.0
+    image: ghcr.io/nothing2obvi/ersatztv-jellyfin-bridge:latest
     ports:
       - "8121:8121"
     volumes:

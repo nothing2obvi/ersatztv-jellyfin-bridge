@@ -1,6 +1,6 @@
 services:
   ersatztv-jellyfin-bridge:
-    image: ghcr.io/nothing2obvi/ersatztv-jellyfin-bridge:v0.1.0
+    image: ghcr.io/nothing2obvi/ersatztv-jellyfin-bridge:latest
     build: .
     ports:
       - "8121:8121"

@@ -1,0 +1,7 @@
+.git
+.venv
+__pycache__
+*.ts
+*.mkv
+config.yml
+*.nut

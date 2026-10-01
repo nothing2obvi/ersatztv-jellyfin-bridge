@@ -1,0 +1,15 @@
+services:
+  ersatztv-jellyfin-bridge:
+    image: ghcr.io/nothing2obvi/ersatztv-jellyfin-bridge:v0.1.0
+    build: .
+    ports:
+      - "8121:8121"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8121/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

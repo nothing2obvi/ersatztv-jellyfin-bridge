@@ -1,0 +1,8 @@
+m3u_url: http://upstream.example:9191/output/m3u/jellyfin
+# Address of this bridge as reachable from Jellyfin.
+public_url: http://bridge.example:8121
+port: 8121
+sample_seconds: 12
+bitrate_cache_seconds: 300
+playlist_refresh_seconds: 60
+max_concurrent_probes: 2

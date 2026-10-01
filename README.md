@@ -13,14 +13,16 @@ the streams with bitrate metadata Jellyfin can read.
 The bridge **remuxes, without transcoding**: FFmpeg copies the original encoded
 video and audio into a NUT container and adds bitrate metadata. It does not
 re-encode the audio or video, so there is no quality loss from the bridge.
-Jellyfin generally remuxes the output again for clients; it may still transcode
-if client codec support or playback settings require it.
+Jellyfin may remux the output again for clients, or transcode if client codec
+support or playback settings require it.
+
+But in my experience, with this, Jellyfin direct plays, so long as the streams are under the bitrate limits you set in Jellyfin.
 
 ## important notes
 
 - Bitrates are sampled averages and cached for five minutes. First playback can
   take longer while the bridge measures the stream.
-- Output uses NUT. Jellyfin generally needs to remux it for clients; allow remuxing.
+- Output uses NUT. Allow remuxing in Jellyfin for clients that need it.
 - Only HTTP(S) inputs are supported. Subtitles, data tracks, and per-channel
   HTTP header options are not forwarded.
 - Run on a trusted LAN; the proxy has no authentication.

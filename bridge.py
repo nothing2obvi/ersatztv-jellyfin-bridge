@@ -147,8 +147,18 @@ def handler(bridge):
                     self.send_text(502, 'Unable to load upstream playlist\n')
                 return
             key = path.removeprefix('/stream/').removesuffix('.nut')
-            if not path.startswith('/stream/') or key not in bridge.entries:
-                self.send_text(404, 'Unknown channel; load /playlist.m3u first\n')
+            if not path.startswith('/stream/'):
+                self.send_text(404, 'Unknown endpoint\n')
+                return
+            if key not in bridge.entries:
+                try:
+                    bridge.refresh()
+                except Exception:
+                    LOG.exception('Unable to reload channels for stream request')
+                    self.send_text(502, 'Unable to load upstream playlist\n')
+                    return
+            if key not in bridge.entries:
+                self.send_text(404, 'Unknown channel\n')
                 return
             url = bridge.entries[key][1]
             process = None

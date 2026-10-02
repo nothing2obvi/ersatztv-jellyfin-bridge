@@ -1,7 +1,7 @@
 import json
 import unittest
 from unittest.mock import patch, Mock
-from bridge import Bridge, playlist, rates
+from bridge import Bridge, handler, playlist, rates
 
 class BridgeTests(unittest.TestCase):
     def test_playlist_preserves_channel_metadata_and_resolves_relative_urls(self):
@@ -36,6 +36,21 @@ class BridgeTests(unittest.TestCase):
             result = bridge.probe('channel', 'http://upstream.example/stream')
             self.assertEqual(result[0], {0: 7000000})
             probe.assert_called_once()
+
+    def test_stream_request_reloads_channels_after_restart(self):
+        bridge = Bridge({})
+        request = object.__new__(handler(bridge))
+        request.path = '/stream/channel.nut'
+        request.send_text = Mock()
+        def reload():
+            bridge.entries['channel'] = ([], 'http://upstream.example/stream')
+        bridge.refresh = Mock(side_effect=reload)
+        bridge.probe = Mock(side_effect=RuntimeError('stop before remux'))
+        with patch('bridge.LOG.exception'):
+            request.do_GET()
+        bridge.refresh.assert_called_once()
+        bridge.probe.assert_called_once_with('channel', 'http://upstream.example/stream')
+        self.assertEqual(request.send_text.call_args.args[0], 502)
 
     def test_missing_packets_fail_instead_of_inventing_bitrate(self):
         with self.assertRaises(ValueError):

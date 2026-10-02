@@ -16,7 +16,7 @@ re-encode the audio or video, so there is no quality loss from the bridge.
 Jellyfin may remux the output again for clients, or transcode if client codec
 support or playback settings require it.
 
-But in my experience, with this, Jellyfin direct plays, so long as the streams are under the bitrate limits you set in Jellyfin.
+In my experience, Jellyfin uses Direct Play with this bridge as long as the streams stay below the bitrate limits you set in Jellyfin.
 
 ## Important Notes
 

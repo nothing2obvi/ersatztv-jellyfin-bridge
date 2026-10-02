@@ -1,5 +1,7 @@
 # ersatztv-jellyfin-bridge
 
+**Disclaimer**: This project was vibe-coded with Codex. However, I use it all the time.
+
 ## What This Does and Why
 
 Jellyfin mistakes ErsatzTV streams for having a 20 Mbps bitrate even when the

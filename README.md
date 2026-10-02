@@ -20,8 +20,13 @@ In my experience, Jellyfin uses Direct Play with this bridge as long as the stre
 
 ## Important Notes
 
-- Bitrates are sampled averages and cached for five minutes. First playback can
-  take longer while the bridge measures the stream.
+- Bitrates are sampled averages and cached for five minutes by default. First
+  playback can take longer while the bridge measures the stream.
+- Set `bitrate_cache_seconds: 0` to keep each channel's first successful bitrate
+  until the bridge restarts. **Use with caution:** bitrate can change between
+  programs, so the cached value may become inaccurate and cause incorrect
+  playback decisions near your Jellyfin bitrate limits. The cache is in memory
+  and is cleared on restart.
 - Output uses NUT. Allow remuxing in Jellyfin for clients that need it.
 - Only HTTP(S) inputs are supported. Subtitles, data tracks, and per-channel
   HTTP header options are not forwarded.

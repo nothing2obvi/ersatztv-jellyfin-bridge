@@ -69,6 +69,7 @@ class Bridge:
         self.header = '#EXTM3U'
         self.refreshed = 0
         self.cache = {}
+        self.probe_locks = {}
         self.lock = threading.Lock()
         self.probe_slots = threading.BoundedSemaphore(config.get('max_concurrent_probes', 2))
 
@@ -88,9 +89,12 @@ class Bridge:
             return entries
 
     def probe(self, key, url):
-        with self.probe_slots:
+        with self.lock:
+            channel_lock = self.probe_locks.setdefault(key, threading.Lock())
+        with channel_lock, self.probe_slots:
             cached = self.cache.get(key)
-            if cached and time.monotonic() - cached[0] < self.config.get('bitrate_cache_seconds', 300):
+            cache_seconds = self.config.get('bitrate_cache_seconds', 300)
+            if cached and (cache_seconds == 0 or time.monotonic() - cached[0] < cache_seconds):
                 return cached[1]
             args = ['ffprobe', '-v', 'quiet', '-rw_timeout', '15000000',
                     '-analyzeduration', '3000000', '-probesize', '5000000',

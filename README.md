@@ -30,7 +30,7 @@ In my experience, Jellyfin uses Direct Play with this bridge as long as the stre
   playback decisions near your Jellyfin bitrate limits. The cache is in memory
   and is cleared on restart.
 - Output uses NUT. Allow remuxing in Jellyfin for clients that need it.
-- Only HTTP(S) inputs are supported. Subtitles, data tracks, and per-channel
+- Only HTTP(S) inputs are supported. Subtitles (unless burned-in), data tracks, and per-channel
   HTTP header options are not forwarded.
 - Run on a trusted LAN; the proxy has no authentication.
 - Keep your real URLs in `config.yml`, which is excluded from Git and the image.

@@ -1,9 +1,28 @@
+# Source M3U playlist
 m3u_url: http://upstream.example:9191/output/m3u/jellyfin
-# Address of this bridge as reachable from Jellyfin.
+
+# Bridge URL accessible from Jellyfin
 public_url: http://bridge.example:8121
+
+# Bridge listening port
 port: 8121
+
+# Bitrate configuration
+bitrate_mode: auto
+video_bitrate: 7500000
+audio_bitrate: 256000
+
+# Automatic bitrate detection (only applies to auto/fallback modes)
 sample_seconds: 12
-# Set to 0 to keep the first successful bitrate until the bridge restarts.
 bitrate_cache_seconds: 300
-playlist_refresh_seconds: 60
 max_concurrent_probes: 2
+
+# Playlist refresh interval (seconds)
+playlist_refresh_seconds: 60
+
+# FFmpeg input timeout (seconds)
+ffmpeg_input_timeout_seconds: 30
+
+# FFmpeg startup optimizations
+ffmpeg_analyzeduration_seconds: 1
+ffmpeg_probesize_bytes: 1000000

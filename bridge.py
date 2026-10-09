@@ -1,4 +1,4 @@
-"""On-demand IPTV proxy: stream-copy into NUT with measured BPS tags."""
+"""On-demand IPTV proxy: stream-copy into NUT with bitrate metadata."""
 import hashlib
 import json
 import logging
@@ -18,12 +18,78 @@ LOG = logging.getLogger('bridge')
 
 
 RETRY_DELAYS = (1, 2)
+BITRATE_MODES = ('auto', 'fixed', 'fallback')
+
+
+def ffmpeg_input_timeout_us(config):
+    """Validate seconds and convert to FFmpeg's microseconds."""
+    value = config.get('ffmpeg_input_timeout_seconds', 30)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0 < value <= 3600):
+        raise ValueError('ffmpeg_input_timeout_seconds must be a number greater than 0 and at most 3600')
+    return str(round(value * 1_000_000))
+
+
+def ffmpeg_analysis_args(config):
+    """Bound input inspection to reduce channel startup latency.
+
+    FFmpeg option units: analyzeduration in microseconds, probesize in bytes.
+    """
+    seconds = config.get('ffmpeg_analyzeduration_seconds', 1)
+    size = config.get('ffmpeg_probesize_bytes', 1_000_000)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not (0 < seconds <= 120):
+        raise ValueError('ffmpeg_analyzeduration_seconds must be greater than 0 and at most 120')
+    if isinstance(size, bool) or not isinstance(size, int) or not (32 <= size <= 100_000_000):
+        raise ValueError('ffmpeg_probesize_bytes must be an integer from 32 to 100000000')
+    return ['-analyzeduration', str(round(seconds * 1_000_000)), '-probesize', str(size)]
+
+
+def validate_bitrate_config(config):
+    mode = config.get('bitrate_mode', 'auto')
+    if mode not in BITRATE_MODES:
+        raise ValueError(f'bitrate_mode must be one of: {", ".join(BITRATE_MODES)}')
+    if mode in ('fixed', 'fallback'):
+        for field in ('video_bitrate', 'audio_bitrate'):
+            value = config.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f'{field} must be a positive integer (bits per second) in {mode} mode')
+    return mode
+
+
+def fixed_metadata_args(config):
+    """Set a bitrate hint for each mapped video/audio track without probing."""
+    return ['-metadata:s:v', f"BPS={config['video_bitrate']}",
+            '-metadata:s:a', f"BPS={config['audio_bitrate']}"]
+
+
+def measured_metadata_args(measured, ordered):
+    args = []
+    for out_index, stream in enumerate(ordered):
+        args += [f'-metadata:s:{out_index}', f"BPS={measured[stream['index']]}"]
+    return args
+
+
+def safe_ffmpeg_diagnostics(detail, args):
+    """Return useful FFmpeg messages while suppressing URLs and possible secrets.
+
+    When a line contains a URL or credential-looking field, discard that whole
+    line. This deliberately favors protecting IPTV credentials over diagnostics.
+    """
+    private_args = [arg for arg in args if isinstance(arg, str) and
+                    (arg.startswith(('http://', 'https://')) or '://' in arg)]
+    sanitized = []
+    for line in detail.splitlines()[-30:]:
+        if any(value in line for value in private_args) or re.search(
+                r'(?i)(?:https?://|authorization|bearer\s|password|passwd|token|api[_-]?key|username|cookie|\buser=|\bpass=)', line):
+            sanitized.append('[FFmpeg diagnostic line redacted: URL or possible credential]')
+        else:
+            sanitized.append(line[:500])
+    return '\n'.join(sanitized)[-4000:] or '[FFmpeg produced no diagnostic output]'
 
 
 def temporary_error(detail):
     detail = detail.lower()
     return bool(re.search(r'http error 5\d\d|server returned 5\d\d|server returned 5xx|http error 429', detail)) or any(
-        message in detail for message in ('connection timed out', 'connection refused',
+        message in detail for message in ('operation timed out', 'timed out', 'connection timed out', 'connection refused',
                                          'connection reset', 'input/output error', 'i/o error'))
 
 
@@ -36,6 +102,7 @@ def probe_json(args, timeout, key):
             transient = isinstance(error, subprocess.TimeoutExpired) or temporary_error(detail)
             if not transient or attempt == len(RETRY_DELAYS):
                 # Avoid including the input URL (which may contain credentials) in the exception.
+                LOG.error('Channel %s: probe failed:\n%s', key, safe_ffmpeg_diagnostics(detail, args))
                 reason = 'probe timed out' if isinstance(error, subprocess.TimeoutExpired) else 'probe exited with an error'
                 raise RuntimeError(reason) from None
             delay = RETRY_DELAYS[attempt]
@@ -56,19 +123,29 @@ def stop_process(process):
 def start_remux(args, key):
     """Retry startup only, before any bytes or HTTP headers reach the client."""
     for attempt in range(len(RETRY_DELAYS) + 1):
+        attempt_start = time.monotonic()
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors)
             try:
-                first = process.stdout.read(4096)
+                first = process.stdout.read1(4096)
                 if first and process.poll() in (None, 0):
+                    LOG.info('Channel %s: FFmpeg first output after %.3fs (attempt %d)',
+                             key, time.monotonic() - attempt_start, attempt + 1)
                     return process, first
             except BaseException:
                 stop_process(process)
                 raise
             stop_process(process)
-            errors.seek(0)
+            errors.seek(0, os.SEEK_END)
+            size = errors.tell()
+            errors.seek(max(0, size - 16384))
             detail = errors.read().decode(errors='replace')
+        LOG.warning('Channel %s: FFmpeg attempt %d failed after %.3fs',
+                    key, attempt + 1, time.monotonic() - attempt_start)
         if not temporary_error(detail) or attempt == len(RETRY_DELAYS):
+            LOG.error('Channel %s: FFmpeg startup failed (exit code %s):\n%s',
+                      key, process.returncode,
+                      safe_ffmpeg_diagnostics(detail, args))
             raise RuntimeError('Remuxer failed to start')
         delay = RETRY_DELAYS[attempt]
         LOG.warning('Channel %s: temporary playback startup failure; retrying in %ss', key, delay)
@@ -124,6 +201,9 @@ def rates(data):
 class Bridge:
     def __init__(self, config):
         self.config = config
+        self.bitrate_mode = validate_bitrate_config(config)
+        self.ffmpeg_timeout_us = ffmpeg_input_timeout_us(config)
+        self.ffmpeg_analysis = ffmpeg_analysis_args(config)
         self.entries = {}
         self.current_entries = {}
         self.header = '#EXTM3U'
@@ -151,27 +231,34 @@ class Bridge:
     def probe(self, key, url):
         with self.lock:
             channel_lock = self.probe_locks.setdefault(key, threading.Lock())
-        with channel_lock, self.probe_slots:
+        with channel_lock:
             cached = self.cache.get(key)
             cache_seconds = self.config.get('bitrate_cache_seconds', 300)
             if cached and (cache_seconds == 0 or time.monotonic() - cached[0] < cache_seconds):
                 return cached[1]
-            args = ['ffprobe', '-v', 'error', '-rw_timeout', '15000000',
-                    '-analyzeduration', '3000000', '-probesize', '5000000',
-                    '-show_streams', '-of', 'json', url]
-            data = probe_json(args, 25, key)
-            tracks = [s for s in data.get('streams', []) if s.get('codec_type') in ('audio', 'video')]
-            if any(not s.get('bit_rate') and not s.get('tags', {}).get('BPS') for s in tracks):
-                seconds = self.config.get('sample_seconds', 12)
-                args[-1:-1] = ['-read_intervals', f'%+{seconds}', '-show_packets',
-                              '-show_entries', 'packet=stream_index,dts_time,pts_time,size:stream']
-                data = probe_json(args, seconds + 30, key)
-            measured = rates(data)
-            ordered = [s for kind in ('video', 'audio') for s in data['streams'] if s.get('codec_type') == kind]
-            result = (measured, ordered)
-            self.cache[key] = (time.monotonic(), result)
-            LOG.info('Channel %s: track bitrates %s', key, measured)
-            return result
+            with self.probe_slots:
+                try:
+                    args = ['ffprobe', '-v', 'error', '-rw_timeout', '15000000',
+                            '-analyzeduration', '3000000', '-probesize', '5000000',
+                            '-show_streams', '-of', 'json', url]
+                    data = probe_json(args, 25, key)
+                    tracks = [s for s in data.get('streams', []) if s.get('codec_type') in ('audio', 'video')]
+                    if any(not s.get('bit_rate') and not s.get('tags', {}).get('BPS') for s in tracks):
+                        seconds = self.config.get('sample_seconds', 12)
+                        args[-1:-1] = ['-read_intervals', f'%+{seconds}', '-show_packets',
+                                      '-show_entries', 'packet=stream_index,dts_time,pts_time,size:stream']
+                        data = probe_json(args, seconds + 30, key)
+                    measured = rates(data)
+                    ordered = [s for kind in ('video', 'audio') for s in data['streams'] if s.get('codec_type') == kind]
+                    result = (measured, ordered)
+                    self.cache[key] = (time.monotonic(), result)
+                    LOG.info('Channel %s: track bitrates %s', key, measured)
+                    return result
+                except (RuntimeError, ValueError) as error:
+                    if cached is not None:
+                        LOG.warning('Channel %s: probing failed (%s); using expired cached bitrates', key, error)
+                        return cached[1]
+                    raise
 
 
 def handler(bridge):
@@ -221,18 +308,30 @@ def handler(bridge):
                 self.send_text(404, 'Unknown channel\n')
                 return
             url = bridge.entries[key][1]
+            request_start = time.monotonic()
             process = None
             try:
-                measured, ordered = bridge.probe(key, url)
-                args = ['ffmpeg', '-nostdin', '-v', 'error', '-rw_timeout', '15000000',
-                        '-i', url, '-map', '0:v?', '-map', '0:a?', '-c', 'copy', '-map_metadata', '0']
-                # Output stream order is all video tracks followed by all audio tracks.
-                # Match that order to ffprobe's source stream indexes.
-                for out_index, stream in enumerate(ordered):
-                    args += [f'-metadata:s:{out_index}', f"BPS={measured[stream['index']]}"]
-                args += ['-f', 'nut', 'pipe:1']
+                args = ['ffmpeg', '-nostdin', '-v', 'error', '-rw_timeout', bridge.ffmpeg_timeout_us]
+                args += bridge.ffmpeg_analysis
+                args += ['-i', url, '-map', '0:v?', '-map', '0:a?', '-c', 'copy', '-map_metadata', '0']
+                if bridge.bitrate_mode == 'fixed':
+                    metadata = fixed_metadata_args(bridge.config)
+                else:
+                    try:
+                        measured, ordered = bridge.probe(key, url)
+                        metadata = measured_metadata_args(measured, ordered)
+                    except (RuntimeError, ValueError) as error:
+                        if bridge.bitrate_mode != 'fallback':
+                            raise
+                        LOG.warning('Channel %s: probe failed (%s); using configured bitrates', key, error)
+                        metadata = fixed_metadata_args(bridge.config)
+                args += metadata + ['-f', 'nut', 'pipe:1']
                 process, first = start_remux(args, key)
+                LOG.info('Channel %s: request to first NUT bytes %.3fs',
+                         key, time.monotonic() - request_start)
             except Exception:
+                LOG.warning('Channel %s: startup failed after %.3fs',
+                            key, time.monotonic() - request_start)
                 if process is not None:
                     process.kill()
                     process.wait()
@@ -246,7 +345,9 @@ def handler(bridge):
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 self.wfile.write(first)
-                while chunk := process.stdout.read(65536):
+                LOG.info('Channel %s: first NUT bytes delivered after %.3fs',
+                         key, time.monotonic() - request_start)
+                while chunk := process.stdout.read1(65536):
                     self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -263,6 +364,11 @@ if __name__ == '__main__':
     for field in ('m3u_url', 'public_url'):
         if urlsplit(config[field]).scheme not in ('http', 'https'):
             raise ValueError(f'{field} must be an HTTP(S) URL')
-    server = ThreadingHTTPServer(('0.0.0.0', int(config.get('port', 8121))), handler(Bridge(config)))
+    bridge = Bridge(config)
+    LOG.info('Bitrate mode: %s', bridge.bitrate_mode)
+    LOG.info('FFmpeg input timeout: %s seconds', config.get('ffmpeg_input_timeout_seconds', 30))
+    LOG.info('FFmpeg input analysis: %ss, probe size %s bytes',
+             config.get('ffmpeg_analyzeduration_seconds', 1), config.get('ffmpeg_probesize_bytes', 1_000_000))
+    server = ThreadingHTTPServer(('0.0.0.0', int(config.get('port', 8121))), handler(bridge))
     server.daemon_threads = True
     server.serve_forever()

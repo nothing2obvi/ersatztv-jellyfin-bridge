@@ -37,6 +37,7 @@ def sync(target):
     # Private deployments build locally; don't overwrite the published version tag.
     compose = re.sub(r'^    image:.*\n', '', compose, flags=re.M)
     if match:
+        compose = re.sub(r'^    container_name:.*\n', '', compose, flags=re.M)
         compose = compose.replace('    build: .\n', '    build: .\n    container_name: ' + match[1] + '\n')
     compose_path.write_text(compose)
     subprocess.run(['docker', 'compose', 'up', '-d', '--build', '--remove-orphans'], cwd=target, check=True)

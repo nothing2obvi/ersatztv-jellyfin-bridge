@@ -3,8 +3,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
+import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin, urlsplit
@@ -13,6 +15,64 @@ from urllib.request import Request, urlopen
 import yaml
 
 LOG = logging.getLogger('bridge')
+
+
+RETRY_DELAYS = (1, 2)
+
+
+def temporary_error(detail):
+    detail = detail.lower()
+    return bool(re.search(r'http error 5\d\d|server returned 5\d\d|server returned 5xx|http error 429', detail)) or any(
+        message in detail for message in ('connection timed out', 'connection refused',
+                                         'connection reset', 'input/output error', 'i/o error'))
+
+
+def probe_json(args, timeout, key):
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        try:
+            return json.loads(subprocess.run(args, capture_output=True, check=True, timeout=timeout).stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            detail = (error.stderr or b'').decode(errors='replace')
+            transient = isinstance(error, subprocess.TimeoutExpired) or temporary_error(detail)
+            if not transient or attempt == len(RETRY_DELAYS):
+                # Avoid including the input URL (which may contain credentials) in the exception.
+                reason = 'probe timed out' if isinstance(error, subprocess.TimeoutExpired) else 'probe exited with an error'
+                raise RuntimeError(reason) from None
+            delay = RETRY_DELAYS[attempt]
+            LOG.warning('Channel %s: temporary probe failure; retrying in %ss', key, delay)
+            time.sleep(delay)
+
+
+def stop_process(process):
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    process.stdout.close()
+
+
+def start_remux(args, key):
+    """Retry startup only, before any bytes or HTTP headers reach the client."""
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        with tempfile.TemporaryFile() as errors:
+            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errors)
+            try:
+                first = process.stdout.read(4096)
+                if first and process.poll() in (None, 0):
+                    return process, first
+            except BaseException:
+                stop_process(process)
+                raise
+            stop_process(process)
+            errors.seek(0)
+            detail = errors.read().decode(errors='replace')
+        if not temporary_error(detail) or attempt == len(RETRY_DELAYS):
+            raise RuntimeError('Remuxer failed to start')
+        delay = RETRY_DELAYS[attempt]
+        LOG.warning('Channel %s: temporary playback startup failure; retrying in %ss', key, delay)
+        time.sleep(delay)
 
 
 def playlist(text, base):
@@ -96,16 +156,16 @@ class Bridge:
             cache_seconds = self.config.get('bitrate_cache_seconds', 300)
             if cached and (cache_seconds == 0 or time.monotonic() - cached[0] < cache_seconds):
                 return cached[1]
-            args = ['ffprobe', '-v', 'quiet', '-rw_timeout', '15000000',
+            args = ['ffprobe', '-v', 'error', '-rw_timeout', '15000000',
                     '-analyzeduration', '3000000', '-probesize', '5000000',
                     '-show_streams', '-of', 'json', url]
-            data = json.loads(subprocess.run(args, capture_output=True, check=True, timeout=25).stdout)
+            data = probe_json(args, 25, key)
             tracks = [s for s in data.get('streams', []) if s.get('codec_type') in ('audio', 'video')]
             if any(not s.get('bit_rate') and not s.get('tags', {}).get('BPS') for s in tracks):
                 seconds = self.config.get('sample_seconds', 12)
                 args[-1:-1] = ['-read_intervals', f'%+{seconds}', '-show_packets',
                               '-show_entries', 'packet=stream_index,dts_time,pts_time,size:stream']
-                data = json.loads(subprocess.run(args, capture_output=True, check=True, timeout=seconds + 30).stdout)
+                data = probe_json(args, seconds + 30, key)
             measured = rates(data)
             ordered = [s for kind in ('video', 'audio') for s in data['streams'] if s.get('codec_type') == kind]
             result = (measured, ordered)
@@ -171,11 +231,7 @@ def handler(bridge):
                 for out_index, stream in enumerate(ordered):
                     args += [f'-metadata:s:{out_index}', f"BPS={measured[stream['index']]}"]
                 args += ['-f', 'nut', 'pipe:1']
-                process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=None)
-                first = process.stdout.read(4096)
-                if not first or process.poll() not in (None, 0):
-                    process.wait(timeout=5)
-                    raise RuntimeError('Remuxer produced no output')
+                process, first = start_remux(args, key)
             except Exception:
                 if process is not None:
                     process.kill()
@@ -195,13 +251,7 @@ def handler(bridge):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             finally:
-                process.stdout.close()
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+                stop_process(process)
 
     return Handler
 

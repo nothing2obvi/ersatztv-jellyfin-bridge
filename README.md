@@ -22,6 +22,10 @@ In my experience, Jellyfin uses Direct Play with this bridge as long as the stre
 
 ## Important Notes
 
+- Temporary upstream failures during probing or playback startup are retried
+  twice, with one- and two-second delays. This may extend startup time when the
+  upstream is unavailable; active playback is not restarted.
+
 - Bitrates are sampled averages and cached for five minutes by default. First
   playback can take longer while the bridge measures the stream.
 - Set `bitrate_cache_seconds: 0` to keep each channel's first successful bitrate
